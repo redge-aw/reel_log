@@ -29,7 +29,6 @@ class Film {
     required this.id,
     required this.title,
     required this.year,
-    required this.director,
     required this.watched,
     required this.rating, // whole stars 1-5
     this.notes = '',
@@ -38,7 +37,6 @@ class Film {
   final int id;
   final String title;
   final int year;
-  final String director;
   final DateTime watched;
   final int rating;
   final String notes;
@@ -47,7 +45,6 @@ class Film {
         'id': id,
         'title': title,
         'year': year,
-        'director': director,
         'watched': watched.toIso8601String(),
         'rating': rating,
         'notes': notes,
@@ -57,7 +54,6 @@ class Film {
         id: (j['id'] ?? 0) as int,
         title: j['title'] as String,
         year: j['year'] as int,
-        director: j['director'] as String,
         watched: DateTime.parse(j['watched'] as String),
         rating: j['rating'] as int,
         notes: (j['notes'] ?? '') as String,
@@ -74,49 +70,19 @@ class Film {
   }
 }
 
-// Seed copied from the prototype (ratings sum to 35 -> avg "4.4").
+// Demo seed.
 final _seed = [
-  Film(
-    id: 1,
-    title: 'Past Lives',
-    year: 2023,
-    director: 'Celine Song',
-    watched: DateTime(2026, 10, 24),
-    rating: 5,
-    notes:
-        'The bar scene at the end is all in the silences. Rewatching with Maya next month.',
-  ),
-  Film(
-    id: 2,
-    title: 'Perfect Days',
-    year: 2023,
-    director: 'Wim Wenders',
-    watched: DateTime(2026, 10, 11),
-    rating: 4,
-    notes: 'Slow in the best way. The cassette tapes do half the storytelling.',
-  ),
   Film(
     id: 3,
     title: 'Dune: Part Two',
     year: 2024,
-    director: 'Denis Villeneuve',
     watched: DateTime(2026, 9, 28),
     rating: 4,
-  ),
-  Film(
-    id: 4,
-    title: 'The Holdovers',
-    year: 2023,
-    director: 'Alexander Payne',
-    watched: DateTime(2026, 9, 2),
-    rating: 4,
-    notes: 'Felt like a 1970 print. Da\'Vine Joy Randolph carries it.',
   ),
   Film(
     id: 5,
     title: 'Arrival',
     year: 2016,
-    director: 'Denis Villeneuve',
     watched: DateTime(2026, 8, 15),
     rating: 5,
     notes: 'Third watch. The structure still lands.',
@@ -125,7 +91,6 @@ final _seed = [
     id: 6,
     title: 'Oppenheimer',
     year: 2023,
-    director: 'Christopher Nolan',
     watched: DateTime(2026, 7, 30),
     rating: 3,
     notes: 'Great sound design, an hour too long.',
@@ -134,7 +99,6 @@ final _seed = [
     id: 7,
     title: 'Spirited Away',
     year: 2001,
-    director: 'Hayao Miyazaki',
     watched: DateTime(2025, 12, 20),
     rating: 5,
   ),
@@ -142,7 +106,6 @@ final _seed = [
     id: 8,
     title: 'Parasite',
     year: 2019,
-    director: 'Bong Joon-ho',
     watched: DateTime(2025, 11, 3),
     rating: 5,
     notes: 'Staircases everywhere once you notice them.',
@@ -228,11 +191,7 @@ class _ReelLogHomeState extends State<ReelLogHome> {
   List<Film> get _visible {
     final q = _query.trim().toLowerCase();
     final out = _films.where((f) {
-      if (q.isNotEmpty &&
-          !f.title.toLowerCase().contains(q) &&
-          !f.director.toLowerCase().contains(q)) {
-        return false;
-      }
+      if (q.isNotEmpty && !f.title.toLowerCase().contains(q)) return false;
       switch (_filter) {
         case _Filter.all:
           return true;
@@ -421,7 +380,7 @@ class _ReelLogHomeState extends State<ReelLogHome> {
                     style: const TextStyle(
                         fontSize: 16, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 4),
-                Text('${f.year} · ${f.director}',
+                Text('${f.year}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 13, color: _subtle)),

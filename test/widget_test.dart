@@ -11,7 +11,6 @@ void main() {
       id: 5,
       title: 'Arrival',
       year: 2016,
-      director: 'Denis Villeneuve',
       watched: DateTime(2026, 8, 15),
       rating: 5,
       notes: 'Third watch. The structure still lands.',
@@ -33,16 +32,16 @@ void main() {
     await t.pumpWidget(const MainApp());
     await t.pumpAndSettle();
 
-    // Prototype seed: 8 films averaging 4.4.
-    expect(find.text('Past Lives'), findsOneWidget);
+    // Demo seed: 5 films averaging 4.4.
+    expect(find.text('Dune: Part Two'), findsOneWidget);
     expect(find.text('Parasite'), findsOneWidget);
-    expect(find.text('8'), findsOneWidget);
+    expect(find.text('5'), findsOneWidget);
     expect(find.text('4.4'), findsOneWidget);
 
-    await t.enterText(find.byType(TextField), 'villeneuve');
+    await t.enterText(find.byType(TextField), 'arrival');
     await t.pumpAndSettle();
     expect(find.text('Arrival'), findsOneWidget);
-    expect(find.text('Past Lives'), findsNothing);
+    expect(find.text('Parasite'), findsNothing);
 
     await t.enterText(find.byType(TextField), '');
     await t.pumpAndSettle();
