@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _prefsKey = 'reel_log_films';
@@ -14,6 +15,9 @@ const _searchFill = Color(0xFFEDEEF1);
 const _subtle = Color(0xFF76777A);
 const _outline = Color(0xFF6F7975);
 const _chipBorder = Color(0xFFBFC9C4);
+const _ink = Color(0xFF151C23);
+const _fieldBorder = Color(0xFFDBE5E0);
+const _sheetHandle = Color(0xFFC6C6C9);
 
 // Poster tones cycle by film id, mirroring TONES[id % 5] in the prototype.
 const _tones = [
@@ -28,36 +32,42 @@ class Film {
   const Film({
     required this.id,
     required this.title,
-    required this.year,
-    required this.watched,
-    required this.rating, // whole stars 1-5
-    this.notes = '',
+    this.year,
+    required this.watchedYear,
+    required this.rating, // 0 = unrated, else whole stars 1-5
+    this.notes,
   });
 
   final int id;
   final String title;
-  final int year;
-  final DateTime watched;
+  final int? year;
+  final int watchedYear;
   final int rating;
-  final String notes;
+  final String? notes;
 
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'year': year,
-        'watched': watched.toIso8601String(),
-        'rating': rating,
-        'notes': notes,
-      };
+  Map<String, dynamic> toJson() {
+    final m = <String, dynamic>{
+      'id': id,
+      'title': title,
+      'watched': watchedYear,
+      'rating': rating,
+    };
+    if (year != null) m['year'] = year;
+    if (notes != null && notes!.trim().isNotEmpty) m['notes'] = notes;
+    return m;
+  }
 
-  static Film fromJson(Map<String, dynamic> j) => Film(
-        id: (j['id'] ?? 0) as int,
-        title: j['title'] as String,
-        year: j['year'] as int,
-        watched: DateTime.parse(j['watched'] as String),
-        rating: j['rating'] as int,
-        notes: (j['notes'] ?? '') as String,
-      );
+  static Film fromJson(Map<String, dynamic> j) {
+    final w = j['watched'];
+    return Film(
+      id: (j['id'] ?? 0) as int,
+      title: j['title'] as String,
+      year: j['year'] as int?,
+      watchedYear: w is int ? w : DateTime.parse(w as String).year,
+      rating: (j['rating'] ?? 0) as int,
+      notes: j['notes'] as String?,
+    );
+  }
 
   String get initials {
     final words = title
@@ -76,14 +86,14 @@ final _seed = [
     id: 3,
     title: 'Dune: Part Two',
     year: 2024,
-    watched: DateTime(2026, 9, 28),
+    watchedYear: 2026,
     rating: 4,
   ),
   Film(
     id: 5,
     title: 'Arrival',
     year: 2016,
-    watched: DateTime(2026, 8, 15),
+    watchedYear: 2026,
     rating: 5,
     notes: 'Third watch. The structure still lands.',
   ),
@@ -91,7 +101,7 @@ final _seed = [
     id: 6,
     title: 'Oppenheimer',
     year: 2023,
-    watched: DateTime(2026, 7, 30),
+    watchedYear: 2026,
     rating: 3,
     notes: 'Great sound design, an hour too long.',
   ),
@@ -99,35 +109,18 @@ final _seed = [
     id: 7,
     title: 'Spirited Away',
     year: 2001,
-    watched: DateTime(2025, 12, 20),
+    watchedYear: 2025,
     rating: 5,
   ),
   Film(
     id: 8,
     title: 'Parasite',
     year: 2019,
-    watched: DateTime(2025, 11, 3),
+    watchedYear: 2025,
     rating: 5,
     notes: 'Staircases everywhere once you notice them.',
   ),
 ];
-
-const _months = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec'
-];
-
-String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
 
 enum _Filter { all, rated4Plus, withNotes, y2026 }
 
@@ -163,11 +156,12 @@ class _ReelLogHomeState extends State<ReelLogHome> {
   List<Film> _films = List.of(_seed);
   String _query = '';
   _Filter _filter = _Filter.all;
+  late final Future<void> _loadDone;
 
   @override
   void initState() {
     super.initState();
-    _loadOrSeed();
+    _loadDone = _loadOrSeed();
   }
 
   Future<void> _loadOrSeed() async {
@@ -198,13 +192,59 @@ class _ReelLogHomeState extends State<ReelLogHome> {
         case _Filter.rated4Plus:
           return f.rating >= 4;
         case _Filter.withNotes:
-          return f.notes.trim().isNotEmpty;
+          return f.notes?.trim().isNotEmpty ?? false;
         case _Filter.y2026:
-          return f.watched.year == 2026;
+          return f.watchedYear == 2026;
       }
     }).toList();
-    out.sort((a, b) => b.watched.compareTo(a.watched));
+    out.sort((a, b) => b.watchedYear.compareTo(a.watchedYear));
     return out;
+  }
+
+  void _openLogSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      barrierColor: Colors.black.withValues(alpha: 0.4),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      sheetAnimationStyle: const AnimationStyle(
+          duration: Duration(milliseconds: 300), curve: Curves.easeOut),
+      builder: (ctx) => _LogSheet(onSave: _saveDraft),
+    );
+  }
+
+  /// Appends the draft, writes the full list, then closes the sheet and
+  /// confirms. Throws after rolling back when the write fails, so the sheet
+  /// can stay open with the draft intact for a retry.
+  Future<void> _saveDraft(_Draft d) async {
+    await _loadDone;
+    var id = DateTime.now().microsecondsSinceEpoch;
+    while (_films.any((f) => f.id == id)) {
+      id++;
+    }
+    final film = Film(
+        id: id,
+        title: d.title,
+        year: d.year,
+        watchedYear: d.watchedYear,
+        rating: d.rating,
+        notes: d.notes);
+    setState(() => _films = [..._films, film]);
+    try {
+      final store = await SharedPreferences.getInstance();
+      await store.setString(
+          _prefsKey, jsonEncode(_films.map((f) => f.toJson()).toList()));
+    } catch (_) {
+      if (mounted) {
+        setState(() => _films = _films.where((f) => f.id != id).toList());
+      }
+      rethrow;
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Added "${d.title}"')));
   }
 
   @override
@@ -218,7 +258,7 @@ class _ReelLogHomeState extends State<ReelLogHome> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {}, // visual only in demo scope
+        onPressed: _openLogSheet,
         backgroundColor: _primary,
         foregroundColor: Colors.white,
         shape: RoundedRectangleBorder(
@@ -380,10 +420,12 @@ class _ReelLogHomeState extends State<ReelLogHome> {
                     style: const TextStyle(
                         fontSize: 16, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 4),
-                Text('${f.year}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13, color: _subtle)),
+                if (f.year != null)
+                  Text('${f.year}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          const TextStyle(fontSize: 13, color: _subtle)),
                 const SizedBox(height: 4),
                 Row(
                   children: [
@@ -401,7 +443,7 @@ class _ReelLogHomeState extends State<ReelLogHome> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text(_fmtDate(f.watched),
+                    Text('${f.watchedYear}',
                         style: const TextStyle(
                             fontSize: 12, color: _subtle)),
                   ],
@@ -435,3 +477,317 @@ class _Stat extends StatelessWidget {
     );
   }
 }
+
+/// A validated new-film draft: title and notes trimmed, blank notes as null.
+class _Draft {
+  const _Draft({
+    required this.title,
+    required this.year,
+    required this.watchedYear,
+    required this.rating,
+    required this.notes,
+  });
+
+  final String title;
+  final int? year;
+  final int watchedYear;
+  final int rating; // 0 = unrated
+  final String? notes;
+}
+
+class _LogSheet extends StatefulWidget {
+  const _LogSheet({required this.onSave});
+
+  final Future<void> Function(_Draft draft) onSave;
+
+  @override
+  State<_LogSheet> createState() => _LogSheetState();
+}
+
+class _LogSheetState extends State<_LogSheet> {
+  final _title = TextEditingController();
+  final _releaseYear = TextEditingController();
+  late final _watchedYear =
+      TextEditingController(text: '${DateTime.now().year}');
+  final _notes = TextEditingController();
+  int _rating = 0;
+  bool _titleTouched = false;
+  bool _saving = false;
+  String? _releaseYearError;
+  String? _watchedYearError;
+  String? _saveError;
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _releaseYear.dispose();
+    _watchedYear.dispose();
+    _notes.dispose();
+    super.dispose();
+  }
+
+  bool get _canSave => _title.text.trim().isNotEmpty && !_saving;
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final title = _title.text.trim();
+    if (title.isEmpty) {
+      setState(() => _titleTouched = true);
+      return;
+    }
+    final release = _releaseYear.text;
+    final watched = _watchedYear.text;
+    setState(() {
+      _releaseYearError =
+          release.isNotEmpty && release.length != 4
+              ? 'Enter a 4-digit year.'
+              : null;
+      _watchedYearError =
+          watched.length != 4 ? 'Enter a 4-digit year.' : null;
+      _saveError = null;
+    });
+    if (_releaseYearError != null || _watchedYearError != null) return;
+    final notes = _notes.text.trim();
+    setState(() => _saving = true);
+    try {
+      await widget.onSave(_Draft(
+        title: title,
+        year: release.isEmpty ? null : int.parse(release),
+        watchedYear: int.parse(watched),
+        rating: _rating,
+        notes: notes.isEmpty ? null : notes,
+      ));
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _saveError = 'Couldn\'t save "$title". Try again.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+          left: 20,
+          right: 20,
+          top: 8,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: _sheetHandle,
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Row(
+            children: [
+              const Text('Log a film',
+                  style:
+                      TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+              const Spacer(),
+              IconButton(
+                key: const Key('logClose'),
+                tooltip: 'Close',
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+          const SizedBox(height: 16),
+          _label('Title'),
+          TextField(
+            key: const Key('logTitle'),
+            controller: _title,
+            textInputAction: TextInputAction.next,
+            style: const TextStyle(fontSize: 15),
+            decoration: _field(hint: 'e.g. Aftersun').copyWith(
+              errorText: _titleTouched && _title.text.trim().isEmpty
+                  ? 'Enter a title.'
+                  : null,
+            ),
+            onChanged: (_) => setState(() => _titleTouched = true),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _label('Release year'),
+                    TextField(
+                      key: const Key('logReleaseYear'),
+                      controller: _releaseYear,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(fontSize: 15),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(4),
+                      ],
+                      decoration: _field(
+                          hint: '2022', error: _releaseYearError),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _label('Watched year'),
+                    TextField(
+                      key: const Key('logWatchedYear'),
+                      controller: _watchedYear,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(fontSize: 15),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(4),
+                      ],
+                      decoration:
+                          _field(error: _watchedYearError),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _label('Rating'),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 1; i <= 5; i++) ...[
+                if (i > 1) const SizedBox(width: 4),
+                IconButton(
+                  tooltip: '$i of 5',
+                  iconSize: 28,
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 44, height: 44),
+                  icon: Icon(i <= _rating ? Icons.star : Icons.star_border,
+                      color: i <= _rating ? _primary : _outline),
+                  onPressed: () =>
+                      setState(() => _rating = _rating == i ? 0 : i),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 16),
+          Text.rich(
+            const TextSpan(
+              text: 'Notes ',
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: _ink),
+              children: [
+                TextSpan(
+                    text: '(optional)',
+                    style: TextStyle(fontWeight: FontWeight.w400)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+          TextField(
+            key: const Key('logNotes'),
+            controller: _notes,
+            maxLines: 3,
+            style: const TextStyle(fontSize: 15, height: 1.45),
+            decoration: _field(hint: 'What stayed with you?').copyWith(
+              contentPadding: const EdgeInsets.all(12),
+            ),
+          ),
+          if (_saveError != null) ...[
+            const SizedBox(height: 8),
+            Text(_saveError!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error)),
+          ],
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: _ink,
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  textStyle: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancel'),
+              ),
+              const SizedBox(width: 12),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: _primary,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor:
+                      _primary.withValues(alpha: 0.38),
+                  disabledForegroundColor:
+                      Colors.white.withValues(alpha: 0.7),
+                  minimumSize: const Size(0, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  textStyle: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                onPressed: _canSave ? _save : null,
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Widget _label(String text) => Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(text,
+          style: const TextStyle(
+              fontSize: 13, fontWeight: FontWeight.w500, color: _ink)),
+    );
+
+InputDecoration _field({String? hint, String? error}) => InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(fontSize: 15, color: _subtle),
+      errorText: error,
+      errorStyle: const TextStyle(fontSize: 12),
+      filled: true,
+      fillColor: _surface,
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: _fieldBorder)),
+      enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: _fieldBorder)),
+      focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: _primary, width: 1.5)),
+    );
