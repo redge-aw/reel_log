@@ -39,6 +39,22 @@ Future<String?> _readRawStore() async {
   return prefs.getString('reel_log_films');
 }
 
+Future<void> _openDetail(WidgetTester t, String title) async {
+  await t.tap(find.text(title));
+  await t.pumpAndSettle();
+  expect(find.byKey(const Key('detailBack')), findsOneWidget);
+}
+
+Future<void> _pumpCustomFilms(
+    WidgetTester t, List<Map<String, dynamic>> films) async {
+  SharedPreferences.setMockInitialValues(
+      {'reel_log_films': jsonEncode(films)});
+  await t.binding.setSurfaceSize(const Size(390, 1400));
+  addTearDown(() => t.binding.setSurfaceSize(null));
+  await t.pumpWidget(const MainApp());
+  await t.pumpAndSettle();
+}
+
 Map<String, dynamic> _storedFilm(List<dynamic> films, String title) =>
     films.cast<Map<String, dynamic>>().firstWhere((f) => f['title'] == title);
 
@@ -456,5 +472,247 @@ void main() {
     expect(find.text('Old Film'), findsOneWidget);
     expect(find.text('1999'), findsOneWidget);
     expect(find.text('2020'), findsOneWidget);
+  });
+
+  testWidgets('detail opens from a row and back preserves search and filter',
+      (t) async {
+    await _pumpApp(t);
+    await t.enterText(find.byType(TextField), 'dune');
+    await t.pump();
+    await t.tap(find.widgetWithText(ChoiceChip, '2026'));
+    await t.pumpAndSettle();
+    expect(find.text('Spirited Away'), findsNothing); // 2025 filtered out
+    await _openDetail(t, 'Dune: Part Two');
+    expect(_fieldText(t, const Key('detailTitle')), 'Dune: Part Two');
+    expect(_fieldText(t, const Key('detailReleaseYear')), '2024');
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const Key('detailBack')), findsNothing);
+    expect(find.text('Dune: Part Two'), findsOneWidget);
+    expect(find.text('Spirited Away'), findsNothing); // filter preserved
+  });
+
+  testWidgets('detail shows empty editable release year when year is absent',
+      (t) async {
+    await _pumpCustomFilms(t, [
+      {'id': 9, 'title': 'Aftersun', 'watched': 2024, 'rating': 0},
+    ]);
+    await _openDetail(t, 'Aftersun');
+    expect(_fieldText(t, const Key('detailReleaseYear')), '');
+    expect(_fieldText(t, const Key('detailTitle')), 'Aftersun');
+    expect(_fieldText(t, const Key('detailWatchedYear')), '2024');
+  });
+
+  testWidgets('detail rating is sticky, persists, and updates the list',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Arrival'); // seed rating 5
+    expect(find.text('5 of 5'), findsOneWidget);
+    expect(find.text('Not rated'), findsNothing);
+    await t.tap(find.byTooltip('4 of 5'));
+    await t.pumpAndSettle();
+    expect(find.text('4 of 5'), findsOneWidget);
+    expect(_storedFilm(await _readStore(), 'Arrival')['rating'], 4);
+    await t.tap(find.byTooltip('4 of 5')); // re-tap keeps the rating
+    await t.pumpAndSettle();
+    expect(_storedFilm(await _readStore(), 'Arrival')['rating'], 4);
+    expect(find.text('4 of 5'), findsOneWidget);
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.text('4.2'), findsOneWidget); // (4+4+3+5+5) / 5
+  });
+
+  testWidgets('detail shows Not rated for an unrated film', (t) async {
+    await _pumpCustomFilms(t, [
+      {'id': 9, 'title': 'Aftersun', 'watched': 2024, 'rating': 0},
+    ]);
+    await _openDetail(t, 'Aftersun');
+    expect(find.text('Not rated'), findsOneWidget);
+    await t.tap(find.byTooltip('3 of 5'));
+    await t.pumpAndSettle();
+    expect(find.text('3 of 5'), findsOneWidget);
+    expect(_storedFilm(await _readStore(), 'Aftersun')['rating'], 3);
+  });
+
+  testWidgets('detail rating write failure reverts and shows an error',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Oppenheimer'); // seed rating 3
+    expect(find.text('3 of 5'), findsOneWidget);
+    final platform = SharedPreferencesStorePlatform.instance;
+    addTearDown(
+        () => SharedPreferencesStorePlatform.instance = platform);
+    SharedPreferences.setMockInitialValues({}); // reset instance cache
+    SharedPreferencesStorePlatform.instance = _ThrowingStore.empty();
+    await t.tap(find.byTooltip('5 of 5'));
+    await t.pumpAndSettle();
+    expect(find.text("Couldn't save. Try again."), findsOneWidget);
+    expect(find.text('3 of 5'), findsOneWidget); // reverted
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.text('4.4'), findsOneWidget); // list unchanged
+  });
+
+  testWidgets('detail notes autosave after 500ms with caption', (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Parasite');
+    expect(_fieldText(t, const Key('detailNotes')),
+        'Staircases everywhere once you notice them.');
+    expect(find.text('Saved automatically'), findsOneWidget);
+    await t.enterText(find.byKey(const Key('detailNotes')), 'New note.');
+    await t.pump(const Duration(milliseconds: 600));
+    await t.pumpAndSettle();
+    expect(
+        _storedFilm(await _readStore(), 'Parasite')['notes'], 'New note.');
+    expect(find.text('Saved automatically'), findsOneWidget);
+  });
+
+  testWidgets('detail blank notes are stored absent', (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Parasite');
+    await t.enterText(find.byKey(const Key('detailNotes')), '   ');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const Key('detailBack')), findsNothing); // popped
+    expect(_storedFilm(await _readStore(), 'Parasite').containsKey('notes'),
+        isFalse);
+  });
+
+  testWidgets('detail notes flush on back before 500ms elapses', (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Dune: Part Two'); // seed has no notes
+    await t.enterText(find.byKey(const Key('detailNotes')), 'Typed fast.');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(_storedFilm(await _readStore(), 'Dune: Part Two')['notes'],
+        'Typed fast.');
+  });
+
+  testWidgets('detail shows Film not found when the id is missing',
+      (t) async {
+    SharedPreferences.setMockInitialValues({
+      'reel_log_films': jsonEncode([
+        {'id': 42, 'title': 'Only Film', 'watched': 2024, 'rating': 3},
+      ]),
+    });
+    await t.binding.setSurfaceSize(const Size(390, 1400));
+    addTearDown(() => t.binding.setSurfaceSize(null));
+    await t.pumpWidget(const MainApp());
+    // Seed rows show before the load completes; Dune's id is gone after it.
+    await t.tap(find.text('Dune: Part Two'));
+    await t.pumpAndSettle();
+    expect(find.text('Film not found.'), findsOneWidget);
+    expect(find.text('Only Film'), findsOneWidget);
+  });
+
+  testWidgets('detail whitespace title is blocked, valid title trims',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Dune: Part Two');
+    await t.enterText(find.byKey(const Key('detailTitle')), '   ');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const Key('detailBack')), findsOneWidget); // stays
+    expect(find.text('Enter a title.'), findsOneWidget);
+    expect(_storedFilm(await _readStore(), 'Dune: Part Two')['title'],
+        'Dune: Part Two');
+    await t.enterText(find.byKey(const Key('detailTitle')), ' Past Lives ');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailNotes'))); // blur commits
+    await t.pumpAndSettle();
+    expect(find.text('Enter a title.'), findsNothing);
+    expect(find.text('PL'), findsWidgets); // poster initials updated
+    expect(_storedFilm(await _readStore(), 'Past Lives')['title'],
+        'Past Lives');
+  });
+
+  testWidgets('detail short release year is blocked', (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Dune: Part Two');
+    await t.enterText(find.byKey(const Key('detailReleaseYear')), '99');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const Key('detailBack')), findsOneWidget); // stays
+    expect(find.text('Enter a 4-digit year.'), findsOneWidget);
+    expect(_storedFilm(await _readStore(), 'Dune: Part Two')['year'], 2024);
+  });
+
+  testWidgets('detail watched year validates, release blank stores absent',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Dune: Part Two'); // year 2024, watched 2026
+    await t.enterText(find.byKey(const Key('detailWatchedYear')), '20');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailBack')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const Key('detailBack')), findsOneWidget); // stays
+    expect(find.text('Enter a 4-digit year.'), findsOneWidget);
+    expect(
+        _storedFilm(await _readStore(), 'Dune: Part Two')['watched'], 2026);
+    await t.enterText(find.byKey(const Key('detailWatchedYear')), '2020');
+    await t.enterText(find.byKey(const Key('detailReleaseYear')), '');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailNotes'))); // blur commits
+    await t.pumpAndSettle();
+    expect(find.text('Enter a 4-digit year.'), findsNothing);
+    final saved = _storedFilm(await _readStore(), 'Dune: Part Two');
+    expect(saved['watched'], 2020);
+    expect(saved.containsKey('year'), isFalse);
+  });
+
+  testWidgets('detail text write failure keeps draft and stays open on back',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Dune: Part Two');
+    final platform = SharedPreferencesStorePlatform.instance;
+    addTearDown(
+        () => SharedPreferencesStorePlatform.instance = platform);
+    SharedPreferences.setMockInitialValues({}); // reset instance cache
+    SharedPreferencesStorePlatform.instance = _ThrowingStore.empty();
+    await t.enterText(find.byKey(const Key('detailNotes')), 'Lost draft?');
+    await t.pump(const Duration(milliseconds: 600));
+    await t.pumpAndSettle();
+    expect(find.text("Couldn't save. Try again."), findsOneWidget);
+    expect(_fieldText(t, const Key('detailNotes')), 'Lost draft?');
+    await t.tap(find.byKey(const Key('detailBack'))); // flush fails: stays
+    await t.pumpAndSettle();
+    expect(find.byKey(const Key('detailBack')), findsOneWidget);
+    expect(_fieldText(t, const Key('detailNotes')), 'Lost draft?');
+  });
+
+  testWidgets('detail watched year write failure keeps the draft',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Dune: Part Two');
+    final platform = SharedPreferencesStorePlatform.instance;
+    addTearDown(
+        () => SharedPreferencesStorePlatform.instance = platform);
+    SharedPreferences.setMockInitialValues({}); // reset instance cache
+    SharedPreferencesStorePlatform.instance = _ThrowingStore.empty();
+    await t.enterText(find.byKey(const Key('detailWatchedYear')), '2020');
+    await t.pump();
+    await t.tap(find.byKey(const Key('detailNotes'))); // blur commits
+    await t.pumpAndSettle();
+    expect(find.text("Couldn't save. Try again."), findsOneWidget);
+    expect(_fieldText(t, const Key('detailWatchedYear')), '2020');
+  });
+
+  testWidgets('detail has no share/remove controls or unmodeled keys',
+      (t) async {
+    await _pumpApp(t);
+    await _openDetail(t, 'Arrival');
+    expect(find.text('Share'), findsNothing);
+    expect(find.text('Share film'), findsNothing);
+    expect(find.text('Remove'), findsNothing);
+    await t.tap(find.byTooltip('4 of 5'));
+    await t.pumpAndSettle();
+    final raw = await _readRawStore();
+    expect(raw!.contains('director'), isFalse);
+    expect(raw.contains('runtime'), isFalse);
+    expect(raw.contains('genre'), isFalse);
   });
 }
