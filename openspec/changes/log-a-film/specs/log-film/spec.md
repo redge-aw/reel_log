@@ -82,6 +82,11 @@ The system SHALL set the watched year to the current calendar year when the shee
 - **WHEN** the person clears the watched year and taps Save
 - **THEN** "Enter a 4-digit year." is shown under the watched-year field and the film is not saved
 
+#### Scenario: Short watched year
+
+- **WHEN** the person enters a two-digit watched year and taps Save
+- **THEN** "Enter a 4-digit year." is shown under the watched-year field and the film is not saved
+
 ### Requirement: Rating may be unset
 
 The system SHALL start with no stars selected. Tapping a star SHALL set the rating to that star's count from 1 to 5. Tapping the currently selected rating SHALL clear it to unrated. An unrated film SHALL be savable and SHALL NOT change the average rating.
@@ -117,7 +122,7 @@ The system SHALL allow Save with notes empty. Empty notes SHALL be stored as no 
 
 ### Requirement: Dismissing the sheet discards the draft
 
-The system SHALL discard the draft when the person taps Cancel or the close control. The list and the saved store SHALL stay unchanged.
+The system SHALL discard the draft when the person taps Cancel or the close control, or dismisses the sheet by tapping outside it or dragging it down. The list and the saved store SHALL stay unchanged.
 
 #### Scenario: Cancel
 
@@ -129,15 +134,25 @@ The system SHALL discard the draft when the person taps Cancel or the close cont
 - **WHEN** the person has typed a title and taps the close control
 - **THEN** the sheet closes and the film is not in the list or the saved store
 
+#### Scenario: Dismiss outside the sheet
+
+- **WHEN** the person has typed a title and taps outside the sheet or drags it down
+- **THEN** the sheet closes and the film is not in the list or the saved store
+
 ### Requirement: Save persists a unique entry in watched-year order
 
-The system SHALL append the film with a generated unique identifier that no other film in the list uses, persist the full list, and then show the confirmation `Added "{title}"` using the film's trimmed title. The saved film's title SHALL be the entered title with surrounding whitespace removed. The visible list SHALL order films by watched year, later years first. A film with an earlier watched year SHALL NOT appear above a film with a later watched year.
+The system SHALL append the film with a generated unique identifier no other film uses, persist the full list, close the sheet, then show `Added "{title}"` over the list, using the trimmed title. The stored title SHALL be the entered title trimmed of surrounding whitespace. The list SHALL order by watched year, later first; order within the same watched year is unspecified.
 
 #### Scenario: Successful save
 
 - **WHEN** the person saves a film titled " Aftersun "
-- **THEN** the list shows "Aftersun" and the confirmation `Added "Aftersun"` is shown
+- **THEN** the sheet closes, the list shows "Aftersun", and the confirmation `Added "Aftersun"` is shown
 - **THEN** the saved store contains that film with the title "Aftersun" and no director field
+
+#### Scenario: Two saves get distinct identifiers
+
+- **WHEN** the person saves two films
+- **THEN** the two saved films have different identifiers, and neither identifier matches a film already in the list
 
 #### Scenario: Earlier watched year
 
@@ -151,13 +166,14 @@ The system SHALL append the film with a generated unique identifier that no othe
 
 ### Requirement: Save failure leaves the list unchanged
 
-If persisting the full list fails, the system SHALL NOT keep the film in the list, SHALL NOT show the saved confirmation, and SHALL show `Couldn't save "{title}". Try again.` using the film's trimmed title.
+If persisting the full list fails, the system SHALL NOT keep the film in the list, SHALL NOT show the saved confirmation, and SHALL show `Couldn't save "{title}". Try again.` using the film's trimmed title. The sheet SHALL stay open with the draft as entered, so the person can tap Save again to retry.
 
 #### Scenario: Write fails
 
 - **WHEN** the person saves a film titled "Aftersun" and writing the saved store fails
 - **THEN** the film is not in the list and no `Added "Aftersun"` confirmation is shown
 - **THEN** the message `Couldn't save "Aftersun". Try again.` is shown
+- **THEN** the sheet stays open with the entered title, year, rating, and notes still in place
 
 ### Requirement: Existing saved films still load
 
@@ -181,3 +197,4 @@ This section tracks every change to this spec after its initial version. Anyone 
 - **2026-10-29 — Spec hardening audit** (pre-review): added the "Save failure leaves the list unchanged" requirement; stated the saved title is stored trimmed, not just confirmed trimmed; added scenarios for date changed, rating set, and notes trimmed.
 - **2026-10-29 — PR #1 review 5707679436**: the film id is a generated unique identifier, not an incremental integer; watched date replaced by watched year throughout (requirement renamed to "Watched year defaults to the current year", ordering is by watched year, prior saves with a full watched date load as that date's year); blank notes are stored as no notes.
 - **2026-10-29 — PR #1 review 5707799189**: exact message copy added — confirmation `Added "{title}"`, failure `Couldn't save "{title}". Try again.`, inline title validation `Enter a title.` once the field has been interacted with, and save-time year validation `Enter a 4-digit year.` A non-blank year must now be exactly four digits to save, where any 1–4 digits previously passed.
+- **2026-10-30 — Completeness re-audit** (spec vs. `lib/main.dart`/`tasks.md`): sheet lifecycle on save is now specified — a successful save closes the sheet before the confirmation, and a failed save keeps the sheet open with the draft intact for retry; added a two-digit watched-year scenario reusing `Enter a 4-digit year.`, a two-saves-distinct-identifiers scenario, unspecified ordering for films sharing a watched year, and dismissal by tapping outside the sheet or dragging it down discarding the draft like Cancel.

@@ -69,7 +69,7 @@ Alternative: id chosen when the sheet opens. Uniqueness does not need it, and a 
 
 ### Write, then confirm
 
-Append the film, await `setString` of the full list in the same JSON shape `_loadOrSeed` already writes, then show `Added "{title}"`. If the write throws, drop the film from memory and show `Couldn't save "{title}". Try again.` The existing sort is unchanged in shape, so a film from an earlier watched year slots in by `watchedYear`.
+Append the film, await `setString` of the full list in the same JSON shape `_loadOrSeed` already writes, then close the sheet and show `Added "{title}"`. If the write throws, drop the film from memory, keep the sheet open with the draft as entered so Save can be tapped again, and show `Couldn't save "{title}". Try again.` The existing sort is unchanged in shape, so a film from an earlier watched year slots in by `watchedYear`.
 
 ```mermaid
 flowchart TD
@@ -82,8 +82,8 @@ flowchart TD
     Append --> WriteList["await setString(reel_log_films, full list JSON)"]
 
     WriteList --> WriteOk{Write succeeded?}
-    WriteOk -->|yes| Confirm["Show Added {title} confirmation; list re-sorts by watched year"]
-    WriteOk -->|no| Rollback["Remove film from memory; show Couldn't save {title}. Try again."]
+    WriteOk -->|yes| Confirm["Close sheet; show Added {title} confirmation; list re-sorts by watched year"]
+    WriteOk -->|no| Rollback["Remove film from memory; keep sheet open with draft; show Couldn't save {title}. Try again."]
 ```
 
 ### Sheet presentation
