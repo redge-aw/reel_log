@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -17,6 +18,7 @@ const _outline = Color(0xFF6F7975);
 const _chipBorder = Color(0xFFBFC9C4);
 const _ink = Color(0xFF151C23);
 const _fieldBorder = Color(0xFFDBE5E0);
+const _cardSurface = Color(0xFFF3F3F6);
 const _sheetHandle = Color(0xFFC6C6C9);
 
 // Poster tones cycle by film id, mirroring TONES[id % 5] in the prototype.
@@ -158,6 +160,18 @@ class _ReelLogHomeState extends State<ReelLogHome> {
   _Filter _filter = _Filter.all;
   late final Future<void> _loadDone;
 
+  /// Serializes full-list writes (log-sheet saves and detail edits) so
+  /// concurrent saves can never interleave or clobber one another.
+  Future<void> _writeChain = Future.value();
+
+  /// Runs [op] after the initial load and all previously queued writes.
+  /// A failed op does not break the chain for later writes.
+  Future<void> _enqueueWrite(Future<void> Function() op) {
+    final run = _writeChain.then((_) => _loadDone).then((_) => op());
+    _writeChain = run.then((_) {}, onError: (Object _) {});
+    return run;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -218,33 +232,85 @@ class _ReelLogHomeState extends State<ReelLogHome> {
   /// confirms. Throws after rolling back when the write fails, so the sheet
   /// can stay open with the draft intact for a retry.
   Future<void> _saveDraft(_Draft d) async {
-    await _loadDone;
-    var id = DateTime.now().microsecondsSinceEpoch;
-    while (_films.any((f) => f.id == id)) {
-      id++;
-    }
-    final film = Film(
-        id: id,
-        title: d.title,
-        year: d.year,
-        watchedYear: d.watchedYear,
-        rating: d.rating,
-        notes: d.notes);
-    setState(() => _films = [..._films, film]);
+    Film? added;
     try {
-      final store = await SharedPreferences.getInstance();
-      await store.setString(
-          _prefsKey, jsonEncode(_films.map((f) => f.toJson()).toList()));
+      await _enqueueWrite(() async {
+        var id = DateTime.now().microsecondsSinceEpoch;
+        while (_films.any((f) => f.id == id)) {
+          id++;
+        }
+        added = Film(
+            id: id,
+            title: d.title,
+            year: d.year,
+            watchedYear: d.watchedYear,
+            rating: d.rating,
+            notes: d.notes);
+        final prev = _films;
+        setState(() => _films = [..._films, added!]);
+        try {
+          final store = await SharedPreferences.getInstance();
+          await store.setString(
+              _prefsKey, jsonEncode(_films.map((f) => f.toJson()).toList()));
+        } catch (_) {
+          if (mounted) {
+            setState(() => _films = prev);
+          }
+          rethrow;
+        }
+      });
     } catch (_) {
-      if (mounted) {
-        setState(() => _films = _films.where((f) => f.id != id).toList());
-      }
       rethrow;
     }
     if (!mounted) return;
     Navigator.of(context).pop();
     ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Added "${d.title}"')));
+  }
+
+  /// Replaces the film with [updated.id], writes the full list, and refreshes
+  /// the list. Throws after rolling back when the write fails.
+  Future<void> _updateFilm(Film updated) {
+    return _enqueueWrite(() async {
+      final prev = _films;
+      setState(() => _films = [
+            for (final f in _films) f.id == updated.id ? updated : f
+          ]);
+      try {
+        final store = await SharedPreferences.getInstance();
+        await store.setString(
+            _prefsKey, jsonEncode(_films.map((f) => f.toJson()).toList()));
+      } catch (_) {
+        if (mounted) {
+          setState(() => _films = prev);
+        }
+        rethrow;
+      }
+    });
+  }
+
+  void _openDetail(int id) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _FilmDetailScreen(
+          filmId: id,
+          ensureLoaded: () => _loadDone,
+          loadFilm: (fid) {
+            try {
+              return _films.firstWhere((f) => f.id == fid);
+            } catch (_) {
+              return null;
+            }
+          },
+          updateFilm: _updateFilm,
+          onMissingFilm: () {
+            Navigator.of(context).pop();
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Film not found.')));
+          },
+        ),
+      ),
+    );
   }
 
   @override
@@ -389,7 +455,10 @@ class _ReelLogHomeState extends State<ReelLogHome> {
 
   Widget _row(Film f) {
     final tone = _tones[f.id % _tones.length];
-    return Padding(
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => _openDetail(f.id),
+      child: Padding(
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
       child: Row(
         children: [
@@ -453,6 +522,7 @@ class _ReelLogHomeState extends State<ReelLogHome> {
           ),
           const Icon(Icons.chevron_right, color: _subtle),
         ],
+      ),
       ),
     );
   }
@@ -791,3 +861,605 @@ InputDecoration _field({String? hint, String? error}) => InputDecoration(
           borderRadius: BorderRadius.circular(8),
           borderSide: const BorderSide(color: _primary, width: 1.5)),
     );
+
+/// Film detail screen: header with inline title/year inputs, a sticky
+/// tap-to-save rating card, an inline watched-year input, and debounced
+/// autosaving notes. All writes go through [updateFilm], which serializes
+/// them in `_ReelLogHomeState` and throws on failure.
+class _FilmDetailScreen extends StatefulWidget {
+  const _FilmDetailScreen({
+    required this.filmId,
+    required this.ensureLoaded,
+    required this.loadFilm,
+    required this.updateFilm,
+    required this.onMissingFilm,
+  });
+
+  final int filmId;
+  final Future<void> Function() ensureLoaded;
+  final Film? Function(int id) loadFilm;
+  final Future<void> Function(Film film) updateFilm;
+  final void Function() onMissingFilm;
+
+  @override
+  State<_FilmDetailScreen> createState() => _FilmDetailScreenState();
+}
+
+class _FilmDetailScreenState extends State<_FilmDetailScreen> {
+  Film? _film; // last persisted film; null while resolving
+  int _rating = 0; // displayed rating
+
+  final _title = TextEditingController();
+  final _releaseYear = TextEditingController();
+  final _watchedYear = TextEditingController();
+  final _notes = TextEditingController();
+  final _titleFocus = FocusNode();
+  final _releaseFocus = FocusNode();
+  final _watchedFocus = FocusNode();
+
+  bool _titleDirty = false;
+  bool _releaseDirty = false;
+  bool _watchedDirty = false;
+  bool _notesDirty = false;
+
+  String? _titleError;
+  String? _releaseYearError;
+  String? _watchedYearError;
+  String? _saveError;
+
+  Timer? _notesTimer;
+  bool _savingNotes = false;
+  bool _backBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleFocus.addListener(_onTitleFocusChange);
+    _releaseFocus.addListener(_onReleaseFocusChange);
+    _watchedFocus.addListener(_onWatchedFocusChange);
+    widget.ensureLoaded().then((_) {
+      if (!mounted) return;
+      final film = widget.loadFilm(widget.filmId);
+      if (film == null) {
+        widget.onMissingFilm();
+        return;
+      }
+      setState(() {
+        _film = film;
+        _rating = film.rating;
+        _title.text = film.title;
+        _releaseYear.text = film.year?.toString() ?? '';
+        _watchedYear.text = '${film.watchedYear}';
+        _notes.text = film.notes ?? '';
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _notesTimer?.cancel();
+    _titleFocus.removeListener(_onTitleFocusChange);
+    _releaseFocus.removeListener(_onReleaseFocusChange);
+    _watchedFocus.removeListener(_onWatchedFocusChange);
+    _title.dispose();
+    _releaseYear.dispose();
+    _watchedYear.dispose();
+    _notes.dispose();
+    _titleFocus.dispose();
+    _releaseFocus.dispose();
+    _watchedFocus.dispose();
+    super.dispose();
+  }
+
+  void _onTitleFocusChange() {
+    if (!_titleFocus.hasFocus) unawaited(_commitTitle());
+  }
+
+  void _onReleaseFocusChange() {
+    if (!_releaseFocus.hasFocus) unawaited(_commitReleaseYear());
+  }
+
+  void _onWatchedFocusChange() {
+    if (!_watchedFocus.hasFocus) unawaited(_commitWatchedYear());
+  }
+
+  void _onTitleChanged(String v) {
+    setState(() {
+      _titleDirty = true;
+      if (_titleError != null && v.trim().isNotEmpty) _titleError = null;
+    });
+  }
+
+  void _onReleaseYearChanged(String v) {
+    setState(() {
+      _releaseDirty = true;
+      if (_releaseYearError != null && (v.isEmpty || v.length == 4)) {
+        _releaseYearError = null;
+      }
+    });
+  }
+
+  void _onWatchedYearChanged(String v) {
+    setState(() {
+      _watchedDirty = true;
+      if (_watchedYearError != null && v.length == 4) {
+        _watchedYearError = null;
+      }
+    });
+  }
+
+  void _onNotesChanged(String _) {
+    setState(() => _notesDirty = true);
+    _notesTimer?.cancel();
+    _notesTimer = Timer(
+        const Duration(milliseconds: 500), () => unawaited(_commitNotes()));
+  }
+
+  /// Writes [updated] through the home queue. Shows the save-failure copy
+  /// and returns false when the write throws.
+  Future<bool> _persist(Film updated) async {
+    setState(() => _saveError = null);
+    try {
+      await widget.updateFilm(updated);
+    } catch (_) {
+      if (!mounted) return false;
+      setState(() => _saveError = "Couldn't save. Try again.");
+      return false;
+    }
+    if (!mounted) return false;
+    return true;
+  }
+
+  /// Sticky rating: any tap sets that rating and writes immediately.
+  Future<void> _rate(int stars) async {
+    final film = _film;
+    if (film == null || stars == _rating) return;
+    final prev = _rating;
+    setState(() => _rating = stars);
+    final updated = Film(
+        id: film.id,
+        title: film.title,
+        year: film.year,
+        watchedYear: film.watchedYear,
+        rating: stars,
+        notes: film.notes);
+    try {
+      await widget.updateFilm(updated);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _rating = prev;
+        _saveError = "Couldn't save. Try again.";
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _film = updated);
+  }
+
+  Future<bool> _commitTitle() async {
+    final film = _film;
+    if (!mounted || film == null) return false;
+    final title = _title.text.trim();
+    if (title.isEmpty) {
+      setState(() => _titleError = 'Enter a title.');
+      return false;
+    }
+    if (title == film.title) {
+      setState(() {
+        _titleError = null;
+        _titleDirty = false;
+      });
+      return true;
+    }
+    final updated = Film(
+        id: film.id,
+        title: title,
+        year: film.year,
+        watchedYear: film.watchedYear,
+        rating: _rating,
+        notes: film.notes);
+    final ok = await _persist(updated);
+    if (!mounted) return false;
+    if (ok) {
+      setState(() {
+        _film = updated;
+        _titleDirty = false;
+        _titleError = null;
+      });
+    }
+    return ok;
+  }
+
+  Future<bool> _commitReleaseYear() async {
+    final film = _film;
+    if (!mounted || film == null) return false;
+    final raw = _releaseYear.text;
+    if (raw.isNotEmpty && raw.length != 4) {
+      setState(() => _releaseYearError = 'Enter a 4-digit year.');
+      return false;
+    }
+    final year = raw.isEmpty ? null : int.parse(raw);
+    if (year == film.year) {
+      setState(() {
+        _releaseYearError = null;
+        _releaseDirty = false;
+      });
+      return true;
+    }
+    final updated = Film(
+        id: film.id,
+        title: film.title,
+        year: year,
+        watchedYear: film.watchedYear,
+        rating: _rating,
+        notes: film.notes);
+    final ok = await _persist(updated);
+    if (!mounted) return false;
+    if (ok) {
+      setState(() {
+        _film = updated;
+        _releaseDirty = false;
+        _releaseYearError = null;
+      });
+    }
+    return ok;
+  }
+
+  Future<bool> _commitWatchedYear() async {
+    final film = _film;
+    if (!mounted || film == null) return false;
+    final raw = _watchedYear.text;
+    if (raw.length != 4) {
+      setState(() => _watchedYearError = 'Enter a 4-digit year.');
+      return false;
+    }
+    final watchedYear = int.parse(raw);
+    if (watchedYear == film.watchedYear) {
+      setState(() {
+        _watchedYearError = null;
+        _watchedDirty = false;
+      });
+      return true;
+    }
+    final updated = Film(
+        id: film.id,
+        title: film.title,
+        year: film.year,
+        watchedYear: watchedYear,
+        rating: _rating,
+        notes: film.notes);
+    final ok = await _persist(updated);
+    if (!mounted) return false;
+    if (ok) {
+      setState(() {
+        _film = updated;
+        _watchedDirty = false;
+        _watchedYearError = null;
+      });
+    }
+    return ok;
+  }
+
+  Future<bool> _commitNotes() async {
+    final film = _film;
+    if (!mounted || film == null) return false;
+    _notesTimer?.cancel();
+    final trimmed = _notes.text.trim();
+    final notes = trimmed.isEmpty ? null : trimmed;
+    final current = film.notes?.trim();
+    if ((notes ?? '') == (current ?? '')) {
+      setState(() => _notesDirty = false);
+      return true;
+    }
+    setState(() => _savingNotes = true);
+    final updated = Film(
+        id: film.id,
+        title: film.title,
+        year: film.year,
+        watchedYear: film.watchedYear,
+        rating: _rating,
+        notes: notes);
+    final ok = await _persist(updated);
+    if (!mounted) return false;
+    setState(() {
+      _savingNotes = false;
+      if (ok) {
+        _film = updated;
+        _notesDirty = false;
+      }
+    });
+    return ok;
+  }
+
+  /// Commits dirty fields, awaits pending writes, and pops on success.
+  /// Stays on the detail screen when validation or a write fails.
+  Future<void> _handleBack() async {
+    if (_backBusy) return;
+    if (!mounted || _film == null) {
+      if (mounted) Navigator.of(context).pop();
+      return;
+    }
+    _backBusy = true;
+    try {
+      _notesTimer?.cancel();
+      var ok = true;
+      if (_titleDirty) ok = await _commitTitle() && ok;
+      if (_releaseDirty) ok = await _commitReleaseYear() && ok;
+      if (_watchedDirty) ok = await _commitWatchedYear() && ok;
+      if (_notesDirty) ok = await _commitNotes() && ok;
+      if (ok && mounted) Navigator.of(context).pop();
+    } finally {
+      _backBusy = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final film = _film;
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        await _handleBack();
+      },
+      child: Scaffold(
+        backgroundColor: _surface,
+        body: SafeArea(
+          child: film == null
+              ? const Center(child: CircularProgressIndicator())
+              : _body(film),
+        ),
+      ),
+    );
+  }
+
+  Widget _body(Film film) {
+    final tone = _tones[film.id % _tones.length];
+    final ratingLabel = _rating == 0 ? 'Not rated' : '$_rating of 5';
+    return Column(
+      children: [
+        SizedBox(
+          height: 52,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                InkWell(
+                  key: const Key('detailBack'),
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: _handleBack,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 12, 0),
+                    child: SizedBox(
+                      height: 44,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.chevron_left,
+                              size: 20, color: _primary),
+                          const SizedBox(width: 4),
+                          const Text('Watched',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w500,
+                                  color: _primary)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Container(
+                      width: 112,
+                      height: 168,
+                      decoration: BoxDecoration(
+                        color: Color(tone.$1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      padding: const EdgeInsets.all(10),
+                      alignment: Alignment.bottomLeft,
+                      child: Text(film.initials,
+                          style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w700,
+                              height: 1,
+                              color: Color(tone.$2))),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextField(
+                            key: const Key('detailTitle'),
+                            controller: _title,
+                            focusNode: _titleFocus,
+                            textInputAction: TextInputAction.next,
+                            style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.w700,
+                                height: 1.25,
+                                color: _ink),
+                            decoration: InputDecoration(
+                              hintText: 'Title',
+                              hintStyle: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.w700,
+                                  color: _subtle),
+                              errorText: _titleError,
+                              errorStyle: const TextStyle(fontSize: 12),
+                              border: InputBorder.none,
+                              contentPadding: EdgeInsets.zero,
+                              isDense: true,
+                            ),
+                            onChanged: _onTitleChanged,
+                            onSubmitted: (_) => _commitTitle(),
+                          ),
+                          const SizedBox(height: 6),
+                          TextField(
+                            key: const Key('detailReleaseYear'),
+                            controller: _releaseYear,
+                            focusNode: _releaseFocus,
+                            keyboardType: TextInputType.number,
+                            textInputAction: TextInputAction.next,
+                            style: const TextStyle(
+                                fontSize: 13, color: _subtle),
+                            inputFormatters: [
+                              FilteringTextInputFormatter.digitsOnly,
+                              LengthLimitingTextInputFormatter(4),
+                            ],
+                            decoration: _field(
+                                    hint: 'Release year',
+                                    error: _releaseYearError)
+                                .copyWith(
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 8),
+                            ),
+                            onChanged: _onReleaseYearChanged,
+                            onSubmitted: (_) => _commitReleaseYear(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: _cardSurface,
+                    border: Border.all(color: _fieldBorder),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          const Text('Your rating',
+                              style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: _ink)),
+                          const Spacer(),
+                          Text(ratingLabel,
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: _subtle)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (var i = 1; i <= 5; i++) ...[
+                            if (i > 1) const SizedBox(width: 4),
+                            IconButton(
+                              tooltip: '$i of 5',
+                              iconSize: 32,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                  width: 44, height: 44),
+                              icon: Icon(
+                                  i <= _rating
+                                      ? Icons.star
+                                      : Icons.star_border,
+                                  color:
+                                      i <= _rating ? _primary : _outline),
+                              onPressed: () => _rate(i),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Text('Watched',
+                              style:
+                                  TextStyle(fontSize: 12, color: _subtle)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextField(
+                              key: const Key('detailWatchedYear'),
+                              controller: _watchedYear,
+                              focusNode: _watchedFocus,
+                              keyboardType: TextInputType.number,
+                              textInputAction: TextInputAction.done,
+                              style: const TextStyle(
+                                  fontSize: 13, color: _subtle),
+                              inputFormatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                                LengthLimitingTextInputFormatter(4),
+                              ],
+                              decoration: _field(error: _watchedYearError)
+                                  .copyWith(
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                              ),
+                              onChanged: _onWatchedYearChanged,
+                              onSubmitted: (_) => _commitWatchedYear(),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                const Text('Notes',
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _ink)),
+                const SizedBox(height: 8),
+                TextField(
+                  key: const Key('detailNotes'),
+                  controller: _notes,
+                  minLines: 5,
+                  maxLines: 5,
+                  style: const TextStyle(fontSize: 15, height: 1.45),
+                  decoration:
+                      _field(hint: 'What stayed with you?').copyWith(
+                    contentPadding: const EdgeInsets.all(12),
+                  ),
+                  onChanged: _onNotesChanged,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                    _savingNotes
+                        ? 'Saving...'
+                        : 'Saved automatically',
+                    style:
+                        const TextStyle(fontSize: 12, color: _subtle)),
+                if (_saveError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(_saveError!,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(context).colorScheme.error)),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
